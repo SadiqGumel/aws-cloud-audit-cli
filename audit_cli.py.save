@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+import argparse
+import datetime
+import json
+import sys
+import boto3
+from botocore.exceptions import ClientError
+from tabulate import tabulate
+
+NOW = datetime.datetime.now(datetime.timezone.utc)
+
+def check_iam():
+    client = boto3.client("iam")
+    findings = []
+    paginator = client.get_paginator("list_users")
+    for page in paginator.paginate():
+        for user in page["Users"]:
+            username = user["UserName"]
+            mfa_resp = client.list_mfa_devices(UserName=username)
+            if not mfa_resp.get("MFADevices", []):
+                findings.append({
+                    "Service": "IAM",
+                    "Resource": username,
+                    "Check": "MFA Status",
+                    "Status": "NON_COMPLIANT",
+                    "Details": "No active MFA device registered"
+                })
+            keys_resp = client.list_access_keys(UserName=username)
+            for key in keys_resp.get("AccessKeyMetadata", []):
+                if key["Status"] == "Active":
+                    age_days = (NOW - key["CreateDate"]).days
+                    if age_days > 90:
+                        findings.append({
+                            "Service": "IAM",
+                            "Resource": f"{username} ({key['AccessKeyId']})",
+                            "Check": "Access Key Age",
+                            "Status": "NON_COMPLIANT",
+                            "Details": f"Key active for {age_days} days (threshold: 90)"
+                        })
+    return findings
+
+def check_s3():
+    client = boto3.client("s3")
+    findings = []
+    try:
+        buckets = client.list_buckets().get("Buckets", [])
+    except ClientError as e:
+        return [{"Service": "S3", "Resource": "N/A", "Check": "ListBuckets", "Status": "ERROR", "Details": str(e)}]
+
+    for b in buckets:
+        name = b["Name"]
+        try:
+            enc = client.get_bucket_encryption(Bucket=name)
+            if not enc.get("ServerSideEncryptionConfiguration", {}).get("Rules", []):
+                findings.append({"Service": "S3", "Resource": name, "Check": "Encryption", "Status": "NON_COMPLIANT", "Details": "No encryption rules"})
+        except ClientError:
+            findings.append({"Service": "S3", "Resource": name, "Check": "Encryption", "Status": "NON_COMPLIANT", "Details": "Default encryption missing"})
+
+        try:
+            pab = client.get_public_access_block(Bucket=name)
+            conf = pab.get("PublicAccessBlockConfiguration", {})
+            required = ["BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets"]
+            missing = [k for k in required if not conf.get(k, False)]
+            if missing:
+                findings.append({"Service": "S3", "Resource": name, "Check": "Public Access Block", "Status": "NON_COMPLIANT", "Details": f"Disabled: {', '.join(missing)}"})
+        except ClientError:
+            findings.append({"Service": "S3", "Resource": name, "Check": "Public Access Block", "Status": "NON_COMPLIANT", "Details": "PAB missing"})
+    return findings
+
+def check_sg():
+    client = boto3.client("ec2")
+    findings = []
+    risky_ports = {22: "SSH", 3389: "RDP"}
+    try:
+        sgs = client.describe_security_groups()["SecurityGroups"]
+    except ClientError as e:
+        return [{"Service": "EC2", "Resource": "N/A", "Check": "DescribeSecurityGroups", "Status": "ERROR", "Details": str(e)}]
+
+    for sg in sgs:
+        sg_id = sg["GroupId"]
+        sg_name = sg.get("GroupName", "")
+        for rule in sg.get("IpPermissions", []):
+            from_port = rule.get("FromPort")
+            to_port = rule.get("ToPort")
+            ip_proto = rule.get("IpProtocol")
+            for ip_range in rule.get("IpRanges", []):
+                if ip_range.get("CidrIp") == "0.0.0.0/0":
+                    if ip_proto == "-1":
+                        findings.append({"Service": "SecurityGroup", "Resource": f"{sg_name} ({sg_id})", "Check": "Open Ingress", "Status": "CRITICAL", "Details": "All traffic open to 0.0.0.0/0"})
+                    elif from_port is not None and to_port is not None:
+                        for port, label in risky_ports.items():
+                            if from_port <= port <= to_port:
+                                findings.append({"Service": "SecurityGroup", "Resource": f"{sg_name} ({sg_id})", "Check": f"Open {label}", "Status": "CRITICAL", "Details": f"Port {port} ({label}) exposed to 0.0.0.0/0"})
+    return findings
+
+def main():
+    parser = argparse.ArgumentParser(description="AWS Cloud Infrastructure Audit CLI")
+    parser.add_argument("--check-iam", action="store_true")
+    parser.add_argument("--check-s3", action="store_true")
+    parser.add_argument("--check-sg", action="store_true")
+    parser.add_argument("--all", action="store_tru?
