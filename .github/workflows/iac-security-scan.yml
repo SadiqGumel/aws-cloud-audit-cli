@@ -1,6 +1,7 @@
 name: IaC Security Scan Guardrail
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       - main
