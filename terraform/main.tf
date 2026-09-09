@@ -23,10 +23,27 @@ provider "aws" {
 # 1. HARDENED S3 BUCKET (CIS 2.1.1, CIS 2.1.5)
 # -----------------------------------------------------------------------------
 
+data "aws_caller_identity" "current" {}
+
 resource "aws_kms_key" "s3_kms_key" {
-  description             = "KMS CMK for S3 Server-Side Encryption"
+  description             = "KMS CMK for S3 bucket encryption"
   deletion_window_in_days = 30
   enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      }
+    ]
+  })
 }
 
 resource "aws_s3_bucket" "finance_archive" {
