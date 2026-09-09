@@ -1,0 +1,57 @@
+name: IaC Security Scan Guardrail
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'terraform/**'
+      - '**.tf'
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform/**'
+      - '**.tf'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  checkov-guardrail:
+    name: Checkov Static Analysis Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Static Analysis Engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install checkov
+
+      - name: Execute Checkov IaC Scan
+        id: checkov_scan
+        run: |
+          checkov -d ./terraform/ \
+            --framework terraform \
+            --severity-threshold HIGH \
+            --soft-fail false \
+            --output cli \
+            --output sarif \
+            --output-file-path console,results.sarif
+
+      - name: Upload Security Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-sarif-report
+          path: results.sarif
