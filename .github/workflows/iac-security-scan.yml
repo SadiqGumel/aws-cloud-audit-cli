@@ -44,15 +44,12 @@ jobs:
         run: |
           checkov -d ./terraform/ \
             --framework terraform \
-            --severity-threshold HIGH \
-            --soft-fail false \
-            --output cli \
-            --output sarif \
-            --output-file-path console,results.sarif
+            --compact \
+            --output cli
 
       - name: Upload Security Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: checkov-sarif-report
-          path: results.sarif
+          name: checkov-report
+          path: .
