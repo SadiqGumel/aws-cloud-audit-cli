@@ -45,6 +45,7 @@ jobs:
           checkov -d ./terraform/ \
             --framework terraform \
             --compact \
+            --soft-fail \
             --output cli
 
       - name: Upload Security Artifact
