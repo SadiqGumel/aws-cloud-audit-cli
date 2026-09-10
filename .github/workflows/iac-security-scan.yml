@@ -27,13 +27,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4[cite: 1, 2]
+        uses: actions/checkout@v4
 
       - name: Setup Python Environment
-        uses: actions/setup-python@v5[cite: 1, 2]
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'[cite: 1, 2]
-          cache: 'pip'[cite: 1, 2]
+          python-version: '3.11'
+          cache: 'pip'
 
       - name: Install Checkov Engine
         run: |
@@ -55,7 +55,7 @@ jobs:
     needs: checkov-guardrail
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4[cite: 1, 2]
+        uses: actions/checkout@v4
 
       - name: Setup Terraform CLI
         uses: hashicorp/setup-terraform@v3
