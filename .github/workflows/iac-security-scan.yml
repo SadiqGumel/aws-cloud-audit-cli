@@ -57,10 +57,11 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Terraform CLI
+      - name: Setup Modern Terraform CLI
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: '1.6.0'
+          terraform_version: '1.9.5'
+          terraform_wrapper: false
 
       - name: Install Conftest CLI
         run: |
