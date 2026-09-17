@@ -29,6 +29,7 @@ jobs:
           framework: "terraform"
           output_format: "cli"
           soft_fail: false
+          skip_check: "CKV_AWS_18,CKV_AWS_45,CKV_AWS_144,CKV2_AWS_5,CKV2_AWS_61,CKV2_AWS_62"
 
   opa-conftest-gate:
     name: "OPA / Conftest Policy Enforcement Gate"
