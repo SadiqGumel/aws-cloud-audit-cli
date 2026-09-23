@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import urllib.request
 import boto3
 from botocore.exceptions import ClientError
 
@@ -11,10 +12,10 @@ ec2_client = boto3.client("ec2")
 sns_client = boto3.client("sns")
 
 SNS_TOPIC_ARN = os.environ.get("SNS_TOPIC_ARN")
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 PROHIBITED_PORTS = {22, 3389}
 
 def is_port_prohibited(from_port, to_port, protocol):
-    """Evaluates whether a rule targets prohibited ports or wildcard protocols."""
     if protocol == "-1":
         return True
     if from_port is not None and to_port is not None:
@@ -22,6 +23,22 @@ def is_port_prohibited(from_port, to_port, protocol):
             if from_port <= port <= to_port:
                 return True
     return False
+
+def send_slack_notification(message_text):
+    if not SLACK_WEBHOOK_URL:
+        logger.warning("SLACK_WEBHOOK_URL not configured. Skipping Slack alert.")
+        return
+    payload = json.dumps({"text": message_text}).encode("utf-8")
+    req = urllib.request.Request(
+        SLACK_WEBHOOK_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            logger.info("Slack notification sent successfully. Response code: %s", resp.status)
+    except Exception as err:
+        logger.error("Failed to post notification to Slack: %s", err)
 
 def lambda_handler(event, context):
     logger.info("Received EventBridge CloudTrail event: %s", json.dumps(event))
@@ -52,15 +69,9 @@ def lambda_handler(event, context):
         if not is_port_prohibited(from_port, to_port, ip_protocol):
             continue
 
-        # 1. Evaluate IPv4 Drift (0.0.0.0/0)
-        ipv4_ranges = perm.get("ipRanges", {}).get("items", [])
-        for cidr_entry in ipv4_ranges:
-            cidr_ip = cidr_entry.get("cidrIp")
-            if cidr_ip == "0.0.0.0/0":
-                logger.warning(
-                    "DRIFT DETECTED: Unauthorized 0.0.0.0/0 ingress in %s on port %s-%s by %s",
-                    group_id, from_port, to_port, actor
-                )
+        # 1. IPv4 (0.0.0.0/0) Remediation
+        for cidr_entry in perm.get("ipRanges", {}).get("items", []):
+            if cidr_entry.get("cidrIp") == "0.0.0.0/0":
                 try:
                     ec2_client.revoke_security_group_ingress(
                         GroupId=group_id,
@@ -71,24 +82,14 @@ def lambda_handler(event, context):
                             "IpRanges": [{"CidrIp": "0.0.0.0/0"}]
                         }]
                     )
-                    logger.info("Successfully revoked 0.0.0.0/0 ingress from %s", group_id)
-                    remediated_rules.append({
-                        "protocol": ip_protocol,
-                        "port_range": f"{from_port}-{to_port}",
-                        "cidr": "0.0.0.0/0"
-                    })
+                    logger.info("Successfully revoked 0.0.0.0/0 ingress on port %s from %s", from_port, group_id)
+                    remediated_rules.append({"protocol": ip_protocol, "port": from_port, "cidr": "0.0.0.0/0"})
                 except ClientError as err:
                     logger.error("Failed to revoke IPv4 rule from %s: %s", group_id, err)
 
-        # 2. Evaluate IPv6 Drift (::/0)
-        ipv6_ranges = perm.get("ipv6Ranges", {}).get("items", [])
-        for cidr_entry in ipv6_ranges:
-            cidr_ipv6 = cidr_entry.get("cidrIpv6")
-            if cidr_ipv6 == "::/0":
-                logger.warning(
-                    "DRIFT DETECTED: Unauthorized ::/0 ingress in %s on port %s-%s by %s",
-                    group_id, from_port, to_port, actor
-                )
+        # 2. IPv6 (::/0) Remediation
+        for cidr_entry in perm.get("ipv6Ranges", {}).get("items", []):
+            if cidr_entry.get("cidrIpv6") == "::/0":
                 try:
                     ec2_client.revoke_security_group_ingress(
                         GroupId=group_id,
@@ -99,38 +100,33 @@ def lambda_handler(event, context):
                             "Ipv6Ranges": [{"CidrIpv6": "::/0"}]
                         }]
                     )
-                    logger.info("Successfully revoked ::/0 ingress from %s", group_id)
-                    remediated_rules.append({
-                        "protocol": ip_protocol,
-                        "port_range": f"{from_port}-{to_port}",
-                        "cidr": "::/0"
-                    })
+                    logger.info("Successfully revoked ::/0 ingress on port %s from %s", from_port, group_id)
+                    remediated_rules.append({"protocol": ip_protocol, "port": from_port, "cidr": "::/0"})
                 except ClientError as err:
                     logger.error("Failed to revoke IPv6 rule from %s: %s", group_id, err)
 
-    # 3. Dispatch Alert if remediations took place
-    if remediated_rules and SNS_TOPIC_ARN:
-        alert_payload = {
-            "security_group_id": group_id,
-            "remediated_rules": remediated_rules,
-            "actor": actor,
-            "aws_region": detail.get("awsRegion"),
-            "event_time": detail.get("eventTime")
-        }
-        try:
-            sns_client.publish(
-                TopicArn=SNS_TOPIC_ARN,
-                Subject=f"ALERT: Unauthorized SG Ingress Revoked on {group_id}",
-                Message=json.dumps(alert_payload, indent=2)
-            )
-            logger.info("Dispatched remediation notification to SNS Topic: %s", SNS_TOPIC_ARN)
-        except ClientError as sns_err:
-            logger.error("Failed to publish alert to SNS: %s", sns_err)
+    # 3. Alerts Dispatch (SNS & Slack)
+    if remediated_rules:
+        slack_msg = f"[REMEDIATED] Unauthorized SSH rule revoked on {group_id}."
+        send_slack_notification(slack_msg)
+
+        if SNS_TOPIC_ARN:
+            alert_payload = {
+                "security_group_id": group_id,
+                "remediated_rules": remediated_rules,
+                "actor": actor,
+                "status": "REMEDIATED"
+            }
+            try:
+                sns_client.publish(
+                    TopicArn=SNS_TOPIC_ARN,
+                    Subject=f"ALERT: Unauthorized SG Ingress Revoked on {group_id}",
+                    Message=json.dumps(alert_payload, indent=2)
+                )
+            except ClientError as sns_err:
+                logger.error("Failed to publish alert to SNS: %s", sns_err)
 
     return {
         "statusCode": 200,
-        "body": json.dumps({
-            "message": "Evaluation completed",
-            "remediated_count": len(remediated_rules)
-        })
+        "body": json.dumps({"message": "Evaluation completed", "remediated_count": len(remediated_rules)})
     }
